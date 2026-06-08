@@ -1,111 +1,135 @@
 import React, { useEffect, useState, useContext } from 'react';
 import { AppContext } from '../../App';
 import { apiClient } from '../../api/client';
-import { Ad } from '../../types';
+import { AdService } from '../../services/adService';
 import '../../styles/AdsScreen.css';
 
 export default function AdsScreen() {
   const context = useContext(AppContext);
   const user = context?.user;
-  const [ads, setAds] = useState<Ad[]>([]);
-  const [currentAdIndex, setCurrentAdIndex] = useState(0);
-  const [timeRemaining, setTimeRemaining] = useState(30);
-  const [loading, setLoading] = useState(true);
+  const [adStats, setAdStats] = useState({
+    ads_watched_total: 0,
+    adsgram_ads: 0,
+    onclicka_ads: 0,
+  });
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showingAd, setShowingAd] = useState(false);
 
   useEffect(() => {
-    loadAds();
+    loadAdStats();
   }, [user?.telegram_id]);
 
-  const loadAds = async () => {
+  const loadAdStats = async () => {
     try {
-      setLoading(true);
       if (!user) return;
-
-      // Alternate between platforms
-      const adsFromAdsgram = await apiClient.getAdsgramAds(user.telegram_id);
-      const adsFromOnclicka = await apiClient.getOnclickaAds(user.telegram_id);
-
-      const allAds = [
-        ...adsFromAdsgram.ads.map(ad => ({ ...ad, platform: 'adsgram' as const })),
-        ...adsFromOnclicka.ads.map(ad => ({ ...ad, platform: 'onclicka' as const })),
-      ];
-
-      setAds(allAds);
+      const stats = await apiClient.getAdStats(user.telegram_id);
+      setAdStats(stats);
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load ads');
+      setError(err instanceof Error ? err.message : 'Failed to load ad stats');
+    }
+  };
+
+  const handleWatchAd = async () => {
+    try {
+      setLoading(true);
+      setShowingAd(true);
+      setError(null);
+
+      if (!user) return;
+
+      // Show random ad from both platforms
+      const result = await AdService.showRandomAd();
+
+      if (!result.success) {
+        setError(result.message);
+        setShowingAd(false);
+        setLoading(false);
+        return;
+      }
+
+      // Record ad watched on backend
+      const response = await apiClient.recordAdWatched({
+        telegram_id: user.telegram_id,
+        platform: result.platform,
+        watched_duration: result.watched_duration,
+      });
+
+      if (response.success) {
+        // Reload stats
+        await loadAdStats();
+        setError(null);
+      } else {
+        setError(response.message);
+      }
+
+      setShowingAd(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to watch ad');
+      setShowingAd(false);
     } finally {
       setLoading(false);
     }
   };
 
-  useEffect(() => {
-    if (ads.length === 0 || timeRemaining <= 0) return;
-
-    const timer = setInterval(() => {
-      setTimeRemaining(prev => {
-        if (prev <= 1) {
-          // Ad completed successfully
-          handleAdComplete();
-          return 30;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-
-    return () => clearInterval(timer);
-  }, [ads, timeRemaining]);
-
-  const handleAdComplete = () => {
-    if (currentAdIndex < ads.length - 1) {
-      setCurrentAdIndex(currentAdIndex + 1);
-    } else {
-      // All ads watched
-      loadAds();
-      setCurrentAdIndex(0);
-    }
-  };
-
-  const handleSkip = () => {
-    setTimeRemaining(30);
-    if (currentAdIndex < ads.length - 1) {
-      setCurrentAdIndex(currentAdIndex + 1);
-    }
-  };
-
-  if (loading) return <div className="ads-screen"><div className="loader">Loading ads...</div></div>;
-  if (error) return <div className="ads-screen"><div className="error">{error}</div></div>;
-
-  const currentAd = ads[currentAdIndex];
+  const isLimitReached = adStats.ads_watched_total >= 30;
+  const adsgramLimitReached = adStats.adsgram_ads >= 15;
+  const onclickaLimitReached = adStats.onclicka_ads >= 15;
 
   return (
     <div className="ads-screen">
-      <div className="ad-container">
-        <div className="ad-video">
-          <video src={currentAd?.video_url} autoPlay={true} />
-        </div>
+      <div className="ads-container">
+        <h2>📺 Watch Ads</h2>
 
-        <div className="ad-timer">
-          <div className="timer-display">
-            <span className="time">{timeRemaining}s</span>
+        <div className="ads-stats">
+          <div className="stat">
+            <span className="stat-label">Total Ads</span>
+            <span className="stat-value">
+              {adStats.ads_watched_total}/30
+            </span>
           </div>
-          <div className="timer-bar">
-            <div className="timer-fill" style={{ width: `${(timeRemaining / 30) * 100}%` }}></div>
+
+          <div className="stat">
+            <span className="stat-label">Adsgram</span>
+            <span className="stat-value">
+              {adStats.adsgram_ads}/15
+            </span>
+          </div>
+
+          <div className="stat">
+            <span className="stat-label">Onclicka</span>
+            <span className="stat-value">
+              {adStats.onclicka_ads}/15
+            </span>
           </div>
         </div>
 
-        <div className="ad-info">
-          <h3>{currentAd?.title}</h3>
-          <p>{currentAd?.description}</p>
-        </div>
+        {error && <div className="error-message">{error}</div>}
 
-        <button className="btn-skip" onClick={handleSkip} disabled={timeRemaining < 5}>
-          Skip Ad
+        <button
+          className="btn-watch-ad"
+          onClick={handleWatchAd}
+          disabled={loading || showingAd || isLimitReached}
+        >
+          {loading || showingAd ? 'Showing Ad...' : 'Watch Ad'}
         </button>
 
-        <div className="ads-progress">
-          Ads: {user?.ads_watched_today || 0}/30
+        {isLimitReached && (
+          <div className="success-message">
+            ✅ You've watched all 30 ads today! <br/>
+            Complete 10 tasks to get your ₹{user?.balance || '0'} reward.
+          </div>
+        )}
+
+        <div className="ads-info">
+          <h3>📋 How it works:</h3>
+          <ul>
+            <li>✅ Watch ads for 30 seconds each</li>
+            <li>✅ Maximum 15 ads from each platform</li>
+            <li>✅ Complete 30 ads + 10 tasks = ₹10 reward</li>
+            <li>⏰ Limits reset daily at 12:01 AM</li>
+          </ul>
         </div>
       </div>
     </div>
